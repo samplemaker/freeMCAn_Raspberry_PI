@@ -1,2 +1,4 @@
-#
-KERNEL=="freeMCAnPI", OWNER="fmca"
+# configure as you want:
+# give read/write permission to everyone (MODE="0666")
+# give read/write permission to user fmca only (OWNER)
+KERNEL=="freeMCAnPI", OWNER="fmca", MODE="0666"

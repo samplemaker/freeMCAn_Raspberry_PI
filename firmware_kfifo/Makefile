@@ -2,10 +2,9 @@ EXTRA_CFLAGS := -I$(src)/../include
 
 obj-m += firmware_geiger_ts.o
 
-firmware_geiger_ts-objs := kernel_firmware.o kernel_fifo.o
+firmware_geiger_ts-objs := kernel_firmware.o
 
 CFLAGS_kernel_firmware.o := -Wno-declaration-after-statement
-CFLAGS_kernel_fifo.o := -Wno-declaration-after-statement
 
 KVERSION := $(shell uname -r)
 KDIR  := /lib/modules/$(KVERSION)/build

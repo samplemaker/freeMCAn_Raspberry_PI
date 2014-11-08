@@ -35,9 +35,11 @@
 #include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
+#include <linux/kfifo.h>
 #include <asm/uaccess.h>
-#include "kernel_fifo.h"
 #include "common_defs.h"
+
+//#define TEST_ON_X86
 
 
 #define DRIVER_VERSION "v0.1"
@@ -47,13 +49,14 @@
 #define SUCCESS 0
 
 
+#ifndef TEST_ON_X86
 /* Raspberry PI B+ 
    PWR LED --> GPIO 35
 */
 //#define GPIO_TIMEBASE_LED 24
 #define GPIO_TIMEBASE_LED 35
 #define GPIO_INTERRUPT_PIN 23
-
+#endif
 
 /** character device related stuff */
 static dev_t device_number;
@@ -70,19 +73,37 @@ static atomic_t timer_counts = ATOMIC_INIT(0);
 /** character device single open policy */
 static atomic_t dev_use_count = ATOMIC_INIT(-1);
 
+#ifndef TEST_ON_X86
 /** interrupt occurence counter */
 static atomic_t accu_counts = ATOMIC_INIT(0);
+#endif
 
 /** wait queue for blocking/nonblocking read */
 static DECLARE_WAIT_QUEUE_HEAD(wq_read);
-static atomic_t wup_flag = ATOMIC_INIT(1);
+static atomic_t wup_flag = ATOMIC_INIT(0);
 #define UNSET_READABLE_FLAG ( atomic_set( &wup_flag, 0 ) )
 #define SET_READABLE_FLAG ( atomic_set( &wup_flag, 1 ) )
 #define READABLE_FLAG ( atomic_read( &wup_flag ) != 0 )
 
+/** number of characters in the character ring buffer */
+/* must be a power of 2. the maximum number of elements which
+   can be stored is FIFO_SIZE_BYTES/[sizeof(fifo_data_t)
+   + number of extra characters per line] */
+#define FIFO_SIZE_BYTES (1 << 8)
+
+static DECLARE_KFIFO(char_fifo, unsigned char, FIFO_SIZE_BYTES);
+
+/** payload data which is sent over the character device */
+typedef struct {
+  int timer_counts;
+  int kernel_time;
+  int accu_counts;
+} fifo_data_t;
+
+#ifndef TEST_ON_X86
 /** holds the assigned irq line */
 static int gpio_irq_in_number;
-
+#endif
 
 /* local prototypes */
 static enum hrtimer_restart timer_callback(struct hrtimer * unused);
@@ -104,7 +125,7 @@ static struct file_operations device_fops = {
   .poll = device_poll
 };
 
-
+#ifndef TEST_ON_X86
 static inline
 void gpio_toggle(unsigned int gpio_number){
   unsigned int state =  gpio_get_value(gpio_number);
@@ -119,7 +140,7 @@ my_interrupt_handler(int irq, void* dev_id)
    atomic_inc(&accu_counts);
    return IRQ_HANDLED;
 }
-
+#endif
 
 /** Timebase timer callback function
  *
@@ -128,7 +149,9 @@ my_interrupt_handler(int irq, void* dev_id)
  */
 static enum hrtimer_restart timer_callback(struct hrtimer * unused)
 {
+  unsigned char a_line[256];
   fifo_data_t fifo_data;
+
   /* get the current time stamp */
   ktime_t kt_now = hrtimer_cb_get_time(&hrt_timebase);
   /* periodic timer */
@@ -138,17 +161,33 @@ static enum hrtimer_restart timer_callback(struct hrtimer * unused)
   /* absolute time since start of measurement */
   ktime_t kt_diff = ktime_sub(kt_now, kt_start);
   fifo_data.kernel_time = ktime_to_ms(kt_diff);
+#ifndef TEST_ON_X86
   /* function can be interrupted by the accu_count ISR because this
      code is running inside a softirq */
   fifo_data.accu_counts = atomic_xchg(&accu_counts, 0);
+#else
+  fifo_data.accu_counts = 1234;
+#endif
   /* the timer softirq does not interrupt itself. not necessarily
      atomic? */
   fifo_data.timer_counts = atomic_read(&timer_counts);
   atomic_inc(&timer_counts);
 
-  fifo_put(fifo_data);
+  /* from now on treat the data simply as a stupid character stream */
 
+  /* create a csv style output */
+  int len = sprintf(a_line,
+                    "event/time/count: ; %d ; %d ; %d\n",
+                    fifo_data.timer_counts,
+                    fifo_data.kernel_time,
+                    fifo_data.accu_counts);
+
+  kfifo_in(&char_fifo, a_line, len);
+  //kfifo_in(&char_fifo,(unsigned char *)(&fifo_data),sizeof(fifo_data_t));
+
+#ifndef TEST_ON_X86
   gpio_toggle(GPIO_TIMEBASE_LED);
+#endif
 
   /* data ready to read. wake up reader task if it does sleep and
      inform poll() */
@@ -202,13 +241,8 @@ device_release(struct inode *inode, struct file *file)
  */
 static ssize_t
 device_read(struct file *filp, char *buffer,
-            size_t length, loff_t * offset)
+            size_t length, loff_t *offset)
 {
-  ssize_t bytes_to_read = 0;
-  char *line_ptr;
-  char a_line[256];
-  fifo_data_t data;
-
   /* no data + nonblocking mode = return without any action */
   if ( (!READABLE_FLAG) &&
        (filp->f_flags & O_NONBLOCK) )
@@ -225,31 +259,16 @@ device_read(struct file *filp, char *buffer,
      therefore it is atomic */
   UNSET_READABLE_FLAG;
 
-  /* prepare fifo for read operation */
-  fifo_request_for_read();
-
-  /* \FIXME (major problem): check put_user() return and stop
-     copying the data if necessary */
-  while (!fifo_get(&data)){
-    /* create a csv style output */
-    sprintf(a_line,
-            "event/time/count: ; %d ; %d ; %d\n",
-            data.timer_counts,
-            data.kernel_time,
-            data.accu_counts);
-
-    line_ptr = a_line;
-    while (length && *line_ptr) {
-      /* copy from kernel space to user space */
-      put_user(*(line_ptr++), buffer++);
-      length--;
-      bytes_to_read++;
-    }
-  }
-  /* remove the data copied */
-  fifo_data_remove();
-
-  return bytes_to_read;
+  /* With only one concurrent reader and one concurrent writer,
+     we don't need extra locking. direct copy_to_user space
+     from the fifo. remove the data copied automatically from the
+     ringbuffer */
+  int ret_val;
+  unsigned int copied;
+  ret_val = kfifo_to_user(&char_fifo, buffer, length, &copied);
+  // ret_val = kfifo_out(&char_fifo, buffer, length);
+  /* -EFAULT or number of bytes copied respectively */
+  return ret_val ? ret_val : copied;
 }
 
 
@@ -261,9 +280,11 @@ restart_firmware(void){
   hrtimer_start(&hrt_timebase, kt_period, HRTIMER_MODE_REL);
   kt_start = hrtimer_cb_get_time(&hrt_timebase);
   atomic_set(&timer_counts, 0);
+#ifndef TEST_ON_X86
   disable_irq(gpio_irq_in_number);
   atomic_set(&accu_counts, 0);
   enable_irq(gpio_irq_in_number);
+#endif
 }
 
 
@@ -277,6 +298,13 @@ device_ioctl(struct file *file,
              unsigned long ioctl_param)
 {
   switch (ioctl_num) {
+
+    case IOCTL_GET_FIFO_LEN:
+       /* get the minimum number of readable characters for lets a
+          readAll() implementation */
+       { const ssize_t len = kfifo_len(&char_fifo);
+       return len; }
+    break;
     case IOCTL_START_MEASUREMENT:
        restart_firmware();
     break;
@@ -328,8 +356,8 @@ device_poll (struct file *file, poll_table *wait)
 static int
 __init firmware_init(void)
 {
+#ifndef TEST_ON_X86
   int ret_val;
-
   /* configure the input ourput peripherals and set the directions */
   ret_val = gpio_request_one(GPIO_TIMEBASE_LED, GPIOF_OUT_INIT_LOW, "Timebase LED");
   if (ret_val < 0)
@@ -361,6 +389,7 @@ __init firmware_init(void)
                         NULL);
   if (ret_val < 0)
     goto err_irq_return;
+#endif
 
   /* setup the character device */
   /* get device number automatically */
@@ -387,7 +416,7 @@ __init firmware_init(void)
                              NULL, "%s", DEVICE_NAME);
 
   /* setup the ringbuffer */
-  fifo_init();
+  INIT_KFIFO(char_fifo);
 
   /* setup the timer period (seconds,nanoseconds) */
   kt_period = ktime_set(1, 0);
@@ -404,12 +433,15 @@ free_cdev:
   kobject_put(&driver_object->kobj);
 free_device_number:
   unregister_chrdev_region(device_number, 1);
+#ifndef TEST_ON_X86
 err_irq_return:
   gpio_free(GPIO_INTERRUPT_PIN);
 gpio_irq_exit:
   gpio_free(GPIO_TIMEBASE_LED);
 gpio_timebase_exit:
+#endif
   return -1;
+
 }
 
 module_init(firmware_init);
@@ -422,9 +454,11 @@ module_init(firmware_init);
 static void
 __exit firmware_exit(void)
 {
+#ifndef TEST_ON_X86
   gpio_free(GPIO_INTERRUPT_PIN);
   gpio_free(GPIO_TIMEBASE_LED);
   free_irq(gpio_irq_in_number, NULL);
+#endif
   hrtimer_cancel(&hrt_timebase);
   wake_up_interruptible(&wq_read);
   /* erase sysfs item and hence the device file */
