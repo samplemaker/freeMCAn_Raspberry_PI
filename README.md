@@ -2,7 +2,7 @@
 
 FreeMCAn-gc is a geiger pulse counter running on Raspberry Pi (B+). To get optimal performance the software is split into a hostware and a firmware part. The hostware is an user console program to collect and record the counting data. Alternatively a GUI related QT version is available. The firmware is a native linux kernel module driver which aquires all hardware related stuff. It sets up a periodic timer ISR and counts the geiger events via a hardware IRQ line (gpio).
 
-[Screenshot](https://github.com/samplemaker/freeMCAn_Raspberry_PI/blob/freeMCAn_Raspberry_PI_github/screenshots/freemcan_in_action.png)
+[Screenshot](https://github.com/samplemaker/freeMCAn_Raspberry_PI/blob/public/screenshots/freemcan_in_action.png)
 
 ## Software and system requirements
 
