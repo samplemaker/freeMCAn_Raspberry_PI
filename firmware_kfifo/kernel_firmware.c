@@ -1,5 +1,5 @@
 /** \file firmware/kernel_firmware.c
- * \brief The freemcan code
+ * \brief Freemcan linux kernel core module
  *
  * \author Copyright (C) 2014 samplemaker
  *
@@ -39,7 +39,8 @@
 #include <asm/uaccess.h>
 #include "common_defs.h"
 
-//#define TEST_ON_X86
+
+// #define TEST_ON_X86
 
 
 #define DRIVER_VERSION "v0.1"
@@ -50,7 +51,7 @@
 
 
 #ifndef TEST_ON_X86
-/* Raspberry PI B+ 
+/* Raspberry PI B+
    PWR LED --> GPIO 35
 */
 //#define GPIO_TIMEBASE_LED 24
@@ -64,11 +65,13 @@ static struct cdev *driver_object;
 static struct class *device_class;
 static struct device *the_device;
 
-/** high resolution time for timebase */
+/** high resolution timer for timebase */
 static struct hrtimer hrt_timebase;
 static ktime_t kt_period, kt_start;
 /** timer event counter */
-static atomic_t timer_counts = ATOMIC_INIT(0);
+static atomic_t timer_counts = ATOMIC_INIT(1);
+
+static unsigned int timercnts_per_sample = 1;
 
 /** character device single open policy */
 static atomic_t dev_use_count = ATOMIC_INIT(-1);
@@ -105,7 +108,7 @@ typedef struct {
 static int gpio_irq_in_number;
 #endif
 
-/* local prototypes */
+/* prototypes */
 static enum hrtimer_restart timer_callback(struct hrtimer * unused);
 static int device_open(struct inode *, struct file *);
 static int device_release(struct inode *, struct file *);
@@ -125,6 +128,7 @@ static struct file_operations device_fops = {
   .poll = device_poll
 };
 
+
 #ifndef TEST_ON_X86
 static inline
 void gpio_toggle(unsigned int gpio_number){
@@ -142,7 +146,8 @@ my_interrupt_handler(int irq, void* dev_id)
 }
 #endif
 
-/** Timebase timer callback function
+
+/** Timer callback function for timebase
  *
  * Collect timestamp and accu_counts in the ring buffer.
  * Wake up reader tasks.
@@ -158,41 +163,49 @@ static enum hrtimer_restart timer_callback(struct hrtimer * unused)
   int overruns = hrtimer_forward(&hrt_timebase, kt_now, kt_period);
   if (overruns > 1)
     printk(KERN_ALERT "freemcan: timer events are missing\n");
-  /* absolute time since start of measurement */
-  ktime_t kt_diff = ktime_sub(kt_now, kt_start);
-  fifo_data.kernel_time = ktime_to_ms(kt_diff);
-#ifndef TEST_ON_X86
-  /* function can be interrupted by the accu_count ISR because this
-     code is running inside a softirq */
-  fifo_data.accu_counts = atomic_xchg(&accu_counts, 0);
-#else
-  fifo_data.accu_counts = 1234;
-#endif
-  /* the timer softirq does not interrupt itself. not necessarily
-     atomic? */
-  fifo_data.timer_counts = atomic_read(&timer_counts);
+
+  /* the timer softirq does not interrupt itself. timer_counts not
+     necessarily atomic? */
+  const int act_timer_counts = atomic_read(&timer_counts);
   atomic_inc(&timer_counts);
 
-  /* from now on treat the data simply as a stupid character stream */
-
-  /* create a csv style output */
-  int len = sprintf(a_line,
-                    "event/time/count: ; %d ; %d ; %d\n",
-                    fifo_data.timer_counts,
-                    fifo_data.kernel_time,
-                    fifo_data.accu_counts);
-
-  kfifo_in(&char_fifo, a_line, len);
-  //kfifo_in(&char_fifo,(unsigned char *)(&fifo_data),sizeof(fifo_data_t));
-
 #ifndef TEST_ON_X86
-  gpio_toggle(GPIO_TIMEBASE_LED);
+    gpio_toggle(GPIO_TIMEBASE_LED);
 #endif
 
-  /* data ready to read. wake up reader task if it does sleep and
-     inform poll() */
-  SET_READABLE_FLAG;
-  wake_up_interruptible(&wq_read);
+  /* create each expired timercnts_per_sample a new ringbuffer element */
+  if (!(act_timer_counts % timercnts_per_sample)){
+
+    fifo_data.timer_counts = act_timer_counts;
+
+    /* absolute time since start of measurement */
+    ktime_t kt_diff = ktime_sub(kt_now, kt_start);
+    fifo_data.kernel_time = ktime_to_ms(kt_diff);
+
+#ifndef TEST_ON_X86
+    /* function can be interrupted by the accu_count ISR because this
+       code is running inside a softirq */
+    fifo_data.accu_counts = atomic_xchg(&accu_counts, 0);
+#else
+    fifo_data.accu_counts = 1234;
+#endif
+
+    /* from now on treat the data simply as a stupid character stream */
+    /* create a csv style output */
+    int len = sprintf(a_line,
+                      "event/time/count: ; %d ; %d ; %d\n",
+                      fifo_data.timer_counts,
+                      fifo_data.kernel_time,
+                      fifo_data.accu_counts);
+
+    kfifo_in(&char_fifo, a_line, len);
+    //kfifo_in(&char_fifo,(unsigned char *)(&fifo_data),sizeof(fifo_data_t));
+
+    /* data ready to read. wake up reader task if it does sleep and
+       inform poll() */
+    SET_READABLE_FLAG;
+    wake_up_interruptible(&wq_read);
+  }
 
   return HRTIMER_RESTART;
 }
@@ -273,13 +286,19 @@ device_read(struct file *filp, char *buffer,
 
 
 static inline void
-restart_firmware(void){
+stop_firmware(void){
   /* \TODO what happens if a not running timer is canceled? */
+  /* cancel the timer and wait until the ISR executes */
   hrtimer_cancel(&hrt_timebase);
   wake_up_interruptible_all(&wq_read);
+}
+
+
+static inline void
+start_firmware(void){
   hrtimer_start(&hrt_timebase, kt_period, HRTIMER_MODE_REL);
   kt_start = hrtimer_cb_get_time(&hrt_timebase);
-  atomic_set(&timer_counts, 0);
+  atomic_set(&timer_counts, 1);
 #ifndef TEST_ON_X86
   disable_irq(gpio_irq_in_number);
   atomic_set(&accu_counts, 0);
@@ -300,26 +319,24 @@ device_ioctl(struct file *file,
   switch (ioctl_num) {
 
     case IOCTL_GET_FIFO_LEN:
-       /* get the minimum number of readable characters for lets a
-          readAll() implementation */
+       /* get the minimum number of readable characters for lets say a
+          readAll() implementation in user space */
        { const ssize_t len = kfifo_len(&char_fifo);
        return len; }
     break;
     case IOCTL_START_MEASUREMENT:
-       restart_firmware();
+       stop_firmware();
+       start_firmware();
     break;
     case IOCTL_STOP_MEASUREMENT:
-       /* cancel the timer and wait until the ISR executes */
-       hrtimer_cancel(&hrt_timebase);
-       wake_up_interruptible_all(&wq_read);
+       stop_firmware();
     break;
-    case IOCTL_SET_SLOW:
-       kt_period = ktime_set(10, 0);
-       restart_firmware();
-    break;
-    case IOCTL_SET_FAST:
-       kt_period = ktime_set(1, 0);
-       restart_firmware();
+    case IOCTL_SET_TCNTSPERSAMPLE:
+       stop_firmware();
+       if (copy_from_user(&timercnts_per_sample,
+                         (unsigned int *)ioctl_param,
+                         sizeof(unsigned int)) )
+         return -EACCES;
     break;
     default:
        printk(KERN_INFO "freemcan: unknown IOCTL:%d\n",ioctl_num);

@@ -30,7 +30,9 @@
 
 #include "qchardev.h"
 #include "parser.h"
+#include "fifo.h"
 
+#define MAX_DATAPOINTS 100
 
 namespace Ui {
     class MainWindow;
@@ -45,9 +47,14 @@ public:
     ~MainWindow();
 
 private:
+    void saveFile();
+    QString fileToSave;
     Parser *mParser;
     int msrmntRunning, totalCounts = 0;
+    unsigned int timerCountsPerSample = 1;
+    payloadData dataBuffer[MAX_DATAPOINTS];
     QcharDev *port;
+    Fifo *mFifo;
     Ui::MainWindow *ui;
 
 
@@ -56,6 +63,7 @@ private slots:
     void onDataAvailable();
     void onActionAboutThis();
     void on_pushButton_clicked();
+    void onActionSaveFileAs();
 };
 
 #endif // MAINWINDOW_H

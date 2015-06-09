@@ -73,6 +73,14 @@ qint64 QcharDev::stopMsrmnt(void)
 }
 
 
+qint64 QcharDev::setTimerCountsPerSample(unsigned int *cps)
+{
+    int retVal = ::ioctl(fd, IOCTL_SET_TCNTSPERSAMPLE, cps);
+
+    return retVal;
+}
+
+
 void QcharDev::_q_canRead()
 {
     //qWarning() << "emit readyread() ";

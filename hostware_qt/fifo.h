@@ -1,5 +1,5 @@
-/** \file qchardev.h
-* \brief QIODevice to access and control the kernel firmware
+/** \file fifo.h
+* \brief
 *
 * \author Copyright (C) 2014 samplemaker
 *
@@ -22,40 +22,48 @@
 */
 
 
-#ifndef _QCHARDEV_H_
-#define _QCHARDEV_H_
+#ifndef FIFO_H_
+#define FIFO_H_
 
-#include <QtCore/QtGlobal>
-#include <QtCore/QIODevice>
+#include <QObject>
+#include "parser.h"
 
-class QSocketNotifier;
 
-class QcharDev: public QIODevice
+/** payload data which is sent over the character device */
+class FifoBuffer
+{
+  public:
+    int size;
+    int start;
+    int count;
+    payloadData *payLoad;
+};
+
+
+/* we need the QObject to implement signals and slots */
+class Fifo : public QObject
 {
     Q_OBJECT
 
 public:
-    QcharDev(QObject *parent = 0);
-    ~QcharDev();
+    explicit Fifo (int size);
+    ~Fifo ();
+    void writeHead(const payloadData *elem);
+    void readTail(payloadData *elem);
+    int copyLastN(int N, payloadData *elem);
+    int isFull(void);
+    int isEmpty(void);
+    void reset(void);
 
-    qint64 stopMsrmnt(void);
-    qint64 startMsrmnt(void);
-    qint64 setTimerCountsPerSample(unsigned int *cps);
-    qint64 bytesAvailable() const;
-    QByteArray readAll();
-    bool open(OpenMode mode);
-    void close();
+
+signals:
+
+
+public slots:
+
 
 private:
-    int fd;
-    QSocketNotifier *readNotifier;
-
-protected:
-    qint64 readData(char *data, qint64 maxSize);
-    qint64 writeData(const char *data, qint64 maxSize);
-
-private slots:
-    void _q_canRead(void);
+    FifoBuffer *fb;
 
 };
 

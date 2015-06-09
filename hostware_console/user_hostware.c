@@ -52,8 +52,8 @@ static struct termios new_term_attr;
 enum HOTKEYS{
   KEY_STOPMSRMNT = 'a',
   KEY_STARTMSRMNT = 's',
-  KEY_SLOW = '1',
-  KEY_FAST = '9',
+  KEY_PERSECOND = '1',
+  KEY_PERMINUTE = '9',
   KEY_QUIT = 'q'
 };
 
@@ -86,6 +86,7 @@ print_buf(char *buffer, int len){
 int
 hostware_ctrl(char * ch){
   int ret_val = 0;
+  unsigned int timercounts_per_sample;
   switch (*ch) {
     case KEY_STARTMSRMNT:
       ret_val = ioctl(fd_chardev, IOCTL_START_MEASUREMENT, NULL);
@@ -101,19 +102,21 @@ hostware_ctrl(char * ch){
       else
         printf("measurement stopped\n");
     break;
-    case KEY_SLOW:
-      ioctl(fd_chardev, IOCTL_SET_SLOW, NULL);
+    case KEY_PERMINUTE:
+      timercounts_per_sample = 60;
+      ioctl(fd_chardev, IOCTL_SET_TCNTSPERSAMPLE, &timercounts_per_sample);
       if (ret_val < 0)
         printf("ioctl failed:%d\n", ret_val);
       else
-        printf("set slow\n");
+        printf("60 seconds per sample\n");
     break;
-    case KEY_FAST:
-      ioctl(fd_chardev, IOCTL_SET_FAST, NULL);
+    case KEY_PERSECOND:
+      timercounts_per_sample = 1;
+      ioctl(fd_chardev, IOCTL_SET_TCNTSPERSAMPLE, &timercounts_per_sample);
       if (ret_val < 0)
         printf("ioctl failed:%d\n", ret_val);
       else
-        printf("set fast\n");
+        printf("1 second per sample\n");
     break;
     case KEY_QUIT:
       return -1;
@@ -163,11 +166,11 @@ main (int argc, char *argv[])
   fd_stdin = 0;
   keyboard_init();
 
-  printf("hotkeys are: '%c':stop '%c':start '%c' slow '%c' fast '%c':quit\n",
+  printf("hotkeys are: '%c':stop '%c':start '%c':per minute '%c':per second '%c':quit\n",
          KEY_STOPMSRMNT,
          KEY_STARTMSRMNT,
-         KEY_SLOW,
-         KEY_FAST,
+         KEY_PERMINUTE,
+         KEY_PERSECOND,
          KEY_QUIT);
 
   for (;;) {
